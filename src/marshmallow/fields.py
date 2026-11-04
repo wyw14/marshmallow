@@ -10,6 +10,7 @@ import email.utils
 import ipaddress
 import math
 import numbers
+import re
 import typing
 import uuid
 from collections.abc import Mapping as _Mapping
@@ -77,6 +78,7 @@ __all__ = [
     "String",
     "Time",
     "TimeDelta",
+    "TimeDeltaISO",
     "Tuple",
     "Url",
 ]
@@ -1586,6 +1588,132 @@ class TimeDelta(Field[dt.timedelta]):
         except (OverflowError, ValueError) as error:
             # OverflowError: value out of timedelta's range (e.g. infinity).
             # ValueError: value is NaN.
+            raise self.make_error("invalid") from error
+
+
+class TimeDeltaISO(Field[dt.timedelta]):
+    """A field that (de)serializes a :class:`datetime.timedelta` object to an
+    ISO 8601 duration `str`.
+
+    Only a fixed-duration subset of the ISO 8601 grammar is accepted:
+
+    - an optional leading ``-`` for negative durations;
+    - a day component (``nD``);
+    - a time section, introduced by ``T``, made up of hours (``nH``),
+      minutes (``nM``) and seconds (``nS``), in that order;
+    - seconds may be decimal with at most six digits after the decimal point.
+
+    Components may be omitted as long as at least one is present. Years,
+    months (in the date section), weeks, decimal days and per-component signs
+    are not supported.
+
+    On serialization the canonical representation is used: ``"PT0S"`` for a
+    zero duration, a single leading ``-`` for negative durations and, for
+    other durations, the value broken down into days, hours, minutes and
+    seconds, with trailing zeros stripped from fractional seconds.
+
+    All arithmetic is done with integer microseconds, so negative durations
+    and microsecond precision round-trip exactly.
+
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+
+    .. versionadded:: 4.4.0
+    """
+
+    #: Default error messages.
+    default_error_messages = {"invalid": "Not a valid ISO 8601 duration."}
+
+    _MICROSECONDS_PER_SECOND = 1_000_000
+    _MICROSECONDS_PER_MINUTE = 60 * _MICROSECONDS_PER_SECOND
+    _MICROSECONDS_PER_HOUR = 60 * _MICROSECONDS_PER_MINUTE
+    _MICROSECONDS_PER_DAY = 24 * _MICROSECONDS_PER_HOUR
+
+    # Ordered P[nD]T[nH][nM][nS] with an optional leading minus.
+    # The lookahead after T ensures that the time section contains at least
+    # one component (so "PT" does not match). Fractional seconds allow up to
+    # six digits. Cache the pattern on the class level for performance.
+    _pattern = re.compile(
+        r"^(?P<negative>-?)"
+        r"P"
+        r"(?:(?P<days>\d+)D)?"
+        r"(?:T(?=\d)"
+        r"(?:(?P<hours>\d+)H)?"
+        r"(?:(?P<minutes>\d+)M)?"
+        r"(?:(?P<seconds>\d+(?:\.\d{1,6})?)S)?"
+        r")?$"
+    )
+
+    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
+        if value is None:
+            return None
+
+        microseconds: int = utils.timedelta_to_microseconds(value)
+        if microseconds == 0:
+            return "PT0S"
+
+        sign = ""
+        if microseconds < 0:
+            sign = "-"
+            microseconds = -microseconds
+
+        days, remainder = divmod(microseconds, self._MICROSECONDS_PER_DAY)
+        hours, remainder = divmod(remainder, self._MICROSECONDS_PER_HOUR)
+        minutes, remainder = divmod(remainder, self._MICROSECONDS_PER_MINUTE)
+        seconds, microseconds = divmod(remainder, self._MICROSECONDS_PER_SECOND)
+
+        result = ["P"]
+        if days:
+            result.append(f"{days}D")
+        if hours or minutes or seconds or microseconds:
+            result.append("T")
+            if hours:
+                result.append(f"{hours}H")
+            if minutes:
+                result.append(f"{minutes}M")
+            if seconds or microseconds:
+                if microseconds:
+                    fraction = f"{microseconds:06d}".rstrip("0")
+                    result.append(f"{seconds}.{fraction}S")
+                else:
+                    result.append(f"{seconds}S")
+        return sign + "".join(result)
+
+    def _deserialize(self, value, attr, data, **kwargs) -> dt.timedelta:
+        if isinstance(value, dt.timedelta):
+            return value
+
+        if not isinstance(value, str):
+            raise self.make_error("invalid")
+
+        match = self._pattern.fullmatch(value)
+        if match is None or not any(
+            match.group(component) is not None
+            for component in ("days", "hours", "minutes", "seconds")
+        ):
+            raise self.make_error("invalid")
+
+        days = int(match["days"] or 0)
+        hours = int(match["hours"] or 0)
+        minutes = int(match["minutes"] or 0)
+        seconds_text = match["seconds"]
+        if seconds_text and "." in seconds_text:
+            whole_seconds, fraction = seconds_text.split(".")
+            seconds = int(whole_seconds)
+            microseconds = int(fraction.ljust(6, "0"))
+        else:
+            seconds = int(seconds_text or 0)
+            microseconds = 0
+
+        total_microseconds = (
+            ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+        ) * self._MICROSECONDS_PER_SECOND + microseconds
+        if match["negative"]:
+            total_microseconds = -total_microseconds
+
+        try:
+            return dt.timedelta(microseconds=total_microseconds)
+        except OverflowError as error:
+            # Value out of timedelta's range.
             raise self.make_error("invalid") from error
 
 

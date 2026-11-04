@@ -872,6 +872,131 @@ class TestFieldDeserialization:
             field.deserialize(in_value)
         assert excinfo.value.args[0] == "Not a valid period of time."
 
+    @pytest.mark.parametrize(
+        ("in_value", "expected"),
+        [
+            ("PT0S", dt.timedelta(0)),
+            ("PT0.000001S", dt.timedelta(microseconds=1)),
+            ("-PT0.000001S", dt.timedelta(microseconds=-1)),
+            (
+                "P1DT2H3M4.000005S",
+                dt.timedelta(days=1, hours=2, minutes=3, seconds=4, microseconds=5),
+            ),
+            # day-only duration without a time section
+            ("P3D", dt.timedelta(days=3)),
+            ("PT1H30M", dt.timedelta(hours=1, minutes=30)),
+            ("PT0.5S", dt.timedelta(milliseconds=500)),
+            ("-P1D", dt.timedelta(days=-1)),
+            # middle components may be omitted
+            ("PT1H2S", dt.timedelta(hours=1, seconds=2)),
+            # values crossing day boundaries are normalized with integer us
+            ("PT25H", dt.timedelta(days=1, hours=1)),
+            ("-P1DT1H", dt.timedelta(days=-1, hours=-1)),
+        ],
+    )
+    def test_timedelta_iso_field_deserialization(self, in_value, expected):
+        field = fields.TimeDeltaISO()
+        result = field.deserialize(in_value)
+        assert isinstance(result, dt.timedelta)
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        "canonical",
+        [
+            "PT0S",
+            "PT0.000001S",
+            "-PT0.000001S",
+            "P1DT2H3M4.000005S",
+            "P3D",
+            "PT1H30M",
+            "PT0.5S",
+            "-P1D",
+            "-P1DT0.000001S",
+        ],
+    )
+    def test_timedelta_iso_field_roundtrip(self, canonical):
+        field = fields.TimeDeltaISO()
+        loaded = field.deserialize(canonical)
+        assert field.serialize("duration", {"duration": loaded}) == canonical
+        assert field.deserialize(field._serialize(loaded, None, None)) == loaded
+
+    def test_timedelta_iso_field_passes_through_timedelta(self):
+        field = fields.TimeDeltaISO()
+        value = dt.timedelta(days=1, seconds=2, microseconds=3)
+        assert field.deserialize(value) is value
+
+    @pytest.mark.parametrize(
+        "in_value",
+        [
+            "",
+            "P",
+            "PT",
+            "P1DT",
+            "1D",
+            "T1S",
+            # years, date-section months, weeks and decimal days are unsupported
+            "P1Y",
+            "P1M",
+            "P1W",
+            "P1Y2M3D",
+            "P1W2D",
+            "P1.5D",
+            # per-component signs are unsupported
+            "PT-1H",
+            "P-1D",
+            "+P1D",
+            # components must appear in D, H, M, S order
+            "PT1S1H",
+            "PT1M1H",
+            "P1H",
+            # fractions are only allowed on seconds, with up to 6 digits
+            "PT1.1234567S",
+            "PT1.2.3S",
+            # wrong type, lowercase designators and surrounding whitespace
+            123,
+            [],
+            "p1d",
+            " P1D",
+        ],
+    )
+    def test_invalid_timedelta_iso_field_deserialization(self, in_value):
+        field = fields.TimeDeltaISO()
+        with pytest.raises(ValidationError) as excinfo:
+            field.deserialize(in_value)
+        assert excinfo.value.args[0] == "Not a valid ISO 8601 duration."
+
+    @pytest.mark.parametrize("in_value", ["P1000000000D", "-P1000000000D"])
+    def test_overflowing_timedelta_iso_field_deserialization(self, in_value):
+        field = fields.TimeDeltaISO()
+        with pytest.raises(ValidationError) as excinfo:
+            field.deserialize(in_value)
+        assert excinfo.value.args[0] == "Not a valid ISO 8601 duration."
+
+    def test_timedelta_iso_nested_field_error_position(self):
+        class InnerSchema(Schema):
+            duration = fields.TimeDeltaISO(required=True)
+
+        class OuterSchema(Schema):
+            inner = fields.Nested(InnerSchema)
+
+        with pytest.raises(ValidationError) as excinfo:
+            OuterSchema().load({"inner": {"duration": "P1Y"}})
+        assert excinfo.value.messages == {
+            "inner": {"duration": ["Not a valid ISO 8601 duration."]}
+        }
+
+    def test_timedelta_iso_nested_schema_roundtrip(self):
+        class InnerSchema(Schema):
+            duration = fields.TimeDeltaISO()
+
+        class OuterSchema(Schema):
+            inner = fields.Nested(InnerSchema)
+
+        data = {"inner": {"duration": "-P1DT0.000001S"}}
+        loaded = OuterSchema().load(data)
+        assert loaded == {"inner": {"duration": dt.timedelta(days=-1, microseconds=-1)}}
+        assert OuterSchema().dump(loaded) == data
+
     @pytest.mark.parametrize("format", (None, "%Y-%m-%d"))
     def test_date_field_deserialization(self, format):  # noqa: A002
         field = fields.Date(format=format)

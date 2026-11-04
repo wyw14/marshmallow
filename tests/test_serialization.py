@@ -790,6 +790,34 @@ class TestFieldSerialization:
             field.serialize("d10", user), user.d10.total_seconds() / unit_value
         )
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (dt.timedelta(0), "PT0S"),
+            (dt.timedelta(microseconds=1), "PT0.000001S"),
+            (dt.timedelta(microseconds=-1), "-PT0.000001S"),
+            (
+                dt.timedelta(days=1, hours=2, minutes=3, seconds=4, microseconds=5),
+                "P1DT2H3M4.000005S",
+            ),
+            # day-only durations do not include a trailing T section
+            (dt.timedelta(days=3), "P3D"),
+            (dt.timedelta(hours=1, minutes=30), "PT1H30M"),
+            # trailing zeros are stripped from fractional seconds
+            (dt.timedelta(milliseconds=500), "PT0.5S"),
+            (dt.timedelta(seconds=1, microseconds=123450), "PT1.12345S"),
+            # negative durations carry a single leading minus sign
+            (dt.timedelta(days=-1), "-P1D"),
+            (dt.timedelta(days=-1, microseconds=-1), "-P1DT0.000001S"),
+            # durations crossing day boundaries are broken down into days
+            (dt.timedelta(hours=25), "P1DT1H"),
+            (dt.timedelta(days=-1, hours=-1), "-P1DT1H"),
+        ],
+    )
+    def test_timedelta_iso_field(self, value, expected):
+        field = fields.TimeDeltaISO()
+        assert field.serialize("d", {"d": value}) == expected
+
     def test_datetime_list_field(self):
         obj = DateTimeList([dt.datetime.now(dt.timezone.utc), dt.datetime.now()])
         field = fields.List(fields.DateTime)

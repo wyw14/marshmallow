@@ -6,6 +6,9 @@ Changelog
 
 Features:
 
+- Add `TimeDeltaISO <marshmallow.fields.TimeDeltaISO>` field that
+  (de)serializes `datetime.timedelta` objects to fixed-duration ISO 8601
+  strings (e.g. ``"P1DT2H3M4.000005S"``).
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:
