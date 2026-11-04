@@ -1,6 +1,8 @@
 """Tests for marshmallow.validate"""
 
+import datetime as dt
 import re
+from collections import deque
 
 import pytest
 
@@ -1099,3 +1101,312 @@ def test_and():
 
     errors = excinfo.value.messages
     assert errors == ["Not an even value.", "Must be less than or equal to 6."]
+
+
+def test_monotonic_empty_and_single_element_pass():
+    assert validate.Monotonic()([]) == []
+    assert validate.Monotonic(strict=True)(()) == ()
+    assert validate.Monotonic(increasing=False)([1]) == [1]
+    assert validate.Monotonic(strict=True, increasing=False)(("a",)) == ("a",)
+
+
+def test_monotonic_key_not_called_for_short_sequences():
+    def fail_key(item):
+        raise AssertionError("key should not be called")
+
+    assert validate.Monotonic(key=fail_key)([]) == []
+    assert validate.Monotonic(key=fail_key)([1]) == [1]
+
+
+def test_monotonic_increasing():
+    validator = validate.Monotonic()
+    assert validator([1, 2, 3]) == [1, 2, 3]
+    assert validator((-2, -1, 0, 1)) == (-2, -1, 0, 1)
+    assert validator([1, 1, 2, 2, 3]) == [1, 1, 2, 2, 3]
+    assert validator([1.0, 1, 1.5, 2]) == [1.0, 1, 1.5, 2]
+    assert validator(deque([1, 2, 3])) == deque([1, 2, 3])
+    assert validator(range(3)) == range(3)
+    assert validator(["a", "b", "c"]) == ["a", "b", "c"]
+
+    with pytest.raises(ValidationError, match="non-decreasing"):
+        validator([1, 2, 0])
+    with pytest.raises(ValidationError):
+        validator([3, 2, 1])
+    with pytest.raises(ValidationError):
+        validator([1, 2, 3, 3, 2])
+
+
+def test_monotonic_strict_increasing():
+    validator = validate.Monotonic(strict=True)
+    assert validator([1, 2, 3]) == [1, 2, 3]
+    assert validator((1, 2)) == (1, 2)
+
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        validator([1, 1, 2])
+    with pytest.raises(ValidationError):
+        validator([1, 2, 2, 3])
+    with pytest.raises(ValidationError):
+        validator([3, 2])
+
+
+def test_monotonic_decreasing():
+    validator = validate.Monotonic(increasing=False)
+    assert validator([3, 2, 1]) == [3, 2, 1]
+    assert validator([3, 3, 2, 2, 1]) == [3, 3, 2, 2, 1]
+    assert validator(("c", "b", "a")) == ("c", "b", "a")
+
+    with pytest.raises(ValidationError, match="non-increasing"):
+        validator([1, 2, 0])
+    with pytest.raises(ValidationError):
+        validator([1, 2, 3])
+
+
+def test_monotonic_strict_decreasing():
+    validator = validate.Monotonic(increasing=False, strict=True)
+    assert validator([3, 2, 1]) == [3, 2, 1]
+
+    with pytest.raises(ValidationError, match="strictly decreasing"):
+        validator([3, 3, 1])
+    with pytest.raises(ValidationError):
+        validator([3, 2, 2])
+    with pytest.raises(ValidationError):
+        validator([1, 2])
+
+
+def test_monotonic_first_violating_pair_is_reported():
+    # [2, 0] is the first offending pair, at zero-based pair index 1
+    with pytest.raises(
+        ValidationError,
+        match=(r"0 at index 2 is smaller than 2 at index 1"),
+    ):
+        validate.Monotonic()([1, 2, 0, 5])
+
+    # strict increasing: equality at indices 2 and 3 is the first violation
+    with pytest.raises(
+        ValidationError,
+        match=r"3 at index 3 is not greater than 3 at index 2",
+    ):
+        validate.Monotonic(strict=True)([1, 2, 3, 3, 4])
+
+    with pytest.raises(
+        ValidationError,
+        match=r"3 at index 2 is greater than 1 at index 1",
+    ):
+        validate.Monotonic(increasing=False)([5, 1, 3, 0])
+
+
+def test_monotonic_returns_input_unchanged():
+    validator = validate.Monotonic(strict=True)
+    data = [1, 2, 3]
+    assert validator(data) is data
+
+    data = [1, 1, 2]
+    assert validate.Monotonic()(data) is data
+
+    pair = (3, 2, 1)
+    assert validate.Monotonic(increasing=False)(pair) is pair
+
+    # elements are neither replaced nor copied
+    a = object()
+    b = object()
+    result = validate.Monotonic(key=lambda _: 1)([a, b])
+    assert result[0] is a
+    assert result[1] is b
+
+
+def test_monotonic_with_key():
+    validator = validate.Monotonic(strict=True, key=str.lower)
+    assert validator(["a", "B", "c"]) == ["a", "B", "c"]
+    with pytest.raises(ValidationError):
+        # without the key, uppercase "B" sorts before lowercase "a"
+        validate.Monotonic(strict=True)(["a", "B", "c"])
+
+    records = [
+        {"name": "alice", "age": 30},
+        {"name": "bob", "age": 40},
+        {"name": "carol", "age": 50},
+    ]
+    by_age = validate.Monotonic(key=lambda item: item["age"])
+    assert by_age(records) is records
+    with pytest.raises(ValidationError, match=r"index 2"):
+        by_age(
+            [
+                {"name": "alice", "age": 30},
+                {"name": "carol", "age": 50},
+                {"name": "bob", "age": 40},
+            ]
+        )
+
+    by_age_strict = validate.Monotonic(strict=True, key=lambda item: item["age"])
+    with pytest.raises(ValidationError):
+        by_age_strict(
+            [
+                {"name": "alice", "age": 30},
+                {"name": "bob", "age": 30},
+            ]
+        )
+
+    # Jan 5 2020 (Sunday, isoweekday 7) then Jan 1 (Wednesday, 3): the
+    # dates themselves are increasing but their weekday keys are decreasing
+    dates = [
+        dt.datetime(2020, 1, 5, tzinfo=dt.timezone.utc),
+        dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+    ]
+    assert (
+        validate.Monotonic(increasing=False, key=dt.datetime.isoweekday)(dates) is dates
+    )
+
+
+def test_monotonic_incomparable_elements_become_validation_error():
+    with pytest.raises(ValidationError, match=r"indices 0 and 1") as excinfo:
+        validate.Monotonic()([1, "a"])
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert excinfo.value.messages == [
+        "Elements at indices 0 and 1 cannot be compared: 1 and a."
+    ]
+
+    # first incomparable pair is reported, even though an ordering violation
+    # occurs later
+    with pytest.raises(ValidationError, match=r"indices 1 and 2"):
+        validate.Monotonic()([1, 2, "a", 0])
+
+    with pytest.raises(ValidationError, match=r"indices 0 and 1"):
+        validate.Monotonic(increasing=False)([None, 1])
+
+
+def test_monotonic_incomparable_keys_become_validation_error():
+    with pytest.raises(ValidationError, match=r"indices 0 and 1") as excinfo:
+        validate.Monotonic(key=lambda item: item["n"])([{"n": 1}, {"n": "a"}])
+    assert isinstance(excinfo.value.__cause__, TypeError)
+
+    with pytest.raises(ValidationError, match=r"indices 2 and 3"):
+        validate.Monotonic(key=lambda item: item["n"])(
+            [{"n": 1}, {"n": 2}, {"n": 3}, {"n": "x"}]
+        )
+
+
+def test_monotonic_key_other_exceptions_propagate():
+    def boom(item):
+        raise ValueError("key failure")
+
+    with pytest.raises(ValueError, match="key failure"):
+        validate.Monotonic(key=boom)([1, 2])
+
+    class CustomKeyError(RuntimeError):
+        pass
+
+    def raise_custom(item):
+        raise CustomKeyError
+
+    with pytest.raises(CustomKeyError):
+        validate.Monotonic(key=raise_custom)([1, 2, 3])
+
+    with pytest.raises(KeyError):
+        validate.Monotonic(key=lambda item: item["n"])([{}, {"n": 1}])
+
+    # a TypeError raised by the key function itself (as opposed to the
+    # comparison) propagates untouched
+    with pytest.raises(TypeError):
+        validate.Monotonic(key=lambda item: item + 1)([None, 1])
+
+
+def test_monotonic_rejects_strings_and_bytes():
+    with pytest.raises(ValidationError, match="Strings and bytes"):
+        validate.Monotonic()("abcd")
+    with pytest.raises(ValidationError):
+        validate.Monotonic(strict=True)("aabc")
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(b"abcd")
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(bytearray(b"abcd"))
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(memoryview(b"abcd"))
+
+
+def test_monotonic_rejects_one_shot_iterators_without_consuming_them():
+    gen = (number for number in range(3))
+    with pytest.raises(ValidationError, match="re-iterable sequence"):
+        validate.Monotonic()(gen)
+    # the generator must not have been consumed by validation
+    assert next(gen) == 0
+    assert list(gen) == [1, 2]
+
+    iterator = iter([1, 2, 3])
+    with pytest.raises(ValidationError):
+        validate.Monotonic(strict=True)(iterator)
+    assert next(iterator) == 1
+
+    paired = zip([1, 2], [3, 4])  # noqa: B905
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(paired)
+    assert list(paired) == [(1, 3), (2, 4)]
+
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(map(lambda n: n, [1, 2]))  # noqa: C417
+    with pytest.raises(ValidationError):
+        validate.Monotonic()({1, 2, 3})
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(frozenset({1, 2, 3}))
+    with pytest.raises(ValidationError):
+        validate.Monotonic()({1: 2, 3: 4})
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(123)
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(None)
+
+
+def test_monotonic_accepts_indexed_re_iterable_sequences():
+    class IndexableIterable:
+        def __init__(self, values):
+            self._values = values
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, index):
+            return self._values[index]
+
+    sequence = IndexableIterable([1, 2, 3])
+    assert validate.Monotonic()(sequence) is sequence
+    with pytest.raises(ValidationError):
+        validate.Monotonic()(IndexableIterable([1, 0]))
+
+
+def test_monotonic_custom_message():
+    validator = validate.Monotonic(
+        error="{previous} before {current}; pair starts at index {index}"
+    )
+    with pytest.raises(
+        ValidationError,
+        match=r"2 before 0; pair starts at index 1",
+    ):
+        validator([1, 2, 0])
+
+    validator = validate.Monotonic(
+        increasing=False,
+        strict=True,
+        error="bad pair {index}/{next_index}: {previous} {current}",
+    )
+    with pytest.raises(ValidationError, match=r"bad pair 0/1: 3 3"):
+        validator([3, 3, 1])
+
+    # the custom message also applies when elements cannot be compared
+    with pytest.raises(ValidationError, match=r"bad pair 0/1: 1 a"):
+        validate.Monotonic(error="bad pair {index}/{next_index}: {previous} {current}")(
+            [1, "a"]
+        )
+
+
+def test_monotonic_repr():
+    assert (
+        repr(validate.Monotonic())
+        == "<Monotonic(increasing=True, strict=False, key=None, error=None)>"
+    )
+    assert repr(
+        validate.Monotonic(increasing=False, strict=True, error="bad order")
+    ) == (
+        "<Monotonic(increasing=False, strict=True, key=None, error={!r})>".format(
+            "bad order"
+        )
+    )
+    assert "key=<built-in function abs>" in repr(validate.Monotonic(key=abs))

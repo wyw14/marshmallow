@@ -6,6 +6,9 @@ Changelog
 
 Features:
 
+- Add `marshmallow.validate.Monotonic` to validate that a sequence is
+  monotonically increasing or decreasing, with optional strict ordering,
+  a comparison ``key`` function and custom error messages.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

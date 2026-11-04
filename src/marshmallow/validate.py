@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import typing
 from abc import ABC, abstractmethod
+from collections.abc import Mapping as CollectionMapping
 from operator import attrgetter
 
 from marshmallow.exceptions import ValidationError
@@ -705,4 +706,169 @@ class ContainsNoneOf(NoneOf):
         for val in value:
             if val in self.iterable:
                 raise ValidationError(self._format_error(value))
+        return value
+
+
+class Monotonic(Validator):
+    """Validator which succeeds if the sequence passed to it is monotonic.
+
+    Adjacent elements are compared in the order in which they appear. The
+    sequence is never sorted or copied and the very same object is returned
+    on success. Empty sequences and one-element sequences always pass.
+
+    Example: ::
+
+        from marshmallow import validate
+
+        validate.Monotonic()([1, 2, 2, 3])  # non-decreasing, passes
+        validate.Monotonic(strict=True)([1, 1, 2])
+        # ValidationError: Must be in strictly increasing order: ...
+        validate.Monotonic(increasing=False)([3, 2, 1])  # non-increasing, passes
+
+    :param increasing: When `True` (the default), each element must be
+        greater than or equal to the previous one. When `False`, each
+        element must be less than or equal to the previous one.
+    :param strict: When `True`, adjacent elements must not be equal, i.e.
+        the sequence must be strictly increasing or strictly decreasing.
+        Defaults to `False`, which allows equal adjacent elements.
+    :param key: A one-argument callable used to extract a comparison key
+        from each element, e.g. ``key=str.lower``. When `None` (the
+        default), elements are compared directly.
+    :param error: Error message to raise in case of a validation error.
+        Can be interpolated with `{input}`, `{index}`, `{next_index}`,
+        `{previous}` and `{current}`. ``index`` is the zero-based position
+        of the first element of the first offending pair of adjacent
+        elements.
+
+    .. versionadded:: 4.4.0
+    """
+
+    message_increasing = (
+        "Must be in non-decreasing order: {current} at index {next_index} "
+        "is smaller than {previous} at index {index}."
+    )
+    message_strict_increasing = (
+        "Must be in strictly increasing order: {current} at index {next_index} "
+        "is not greater than {previous} at index {index}."
+    )
+    message_decreasing = (
+        "Must be in non-increasing order: {current} at index {next_index} "
+        "is greater than {previous} at index {index}."
+    )
+    message_strict_decreasing = (
+        "Must be in strictly decreasing order: {current} at index {next_index} "
+        "is not smaller than {previous} at index {index}."
+    )
+    message_not_comparable = (
+        "Elements at indices {index} and {next_index} cannot be compared: "
+        "{previous} and {current}."
+    )
+    message_string_or_bytes = (
+        "Strings and bytes-like objects are not accepted as sequences; pass a "
+        "list, tuple or another re-iterable sequence instead."
+    )
+    message_not_a_sequence = (
+        "Must be a re-iterable sequence; mappings, one-time iterators, sets "
+        "and other non-sequence iterables are not accepted."
+    )
+
+    def __init__(
+        self,
+        *,
+        increasing: bool = True,
+        strict: bool = False,
+        key: typing.Callable[[typing.Any], typing.Any] | None = None,
+        error: str | None = None,
+    ):
+        self.increasing = increasing
+        self.strict = strict
+        self.key = key
+        self.error = error
+        if increasing:
+            self.message_order = (
+                self.message_strict_increasing if strict else self.message_increasing
+            )
+        else:
+            self.message_order = (
+                self.message_strict_decreasing if strict else self.message_decreasing
+            )
+
+    def _repr_args(self) -> str:
+        return (
+            f"increasing={self.increasing!r}, strict={self.strict!r}, key={self.key!r}"
+        )
+
+    def _format_error(
+        self,
+        value: typing.Sequence[typing.Any],
+        message: str,
+        *,
+        index: int,
+        previous: typing.Any,
+        current: typing.Any,
+    ) -> str:
+        return (self.error or message).format(
+            input=value,
+            index=index,
+            next_index=index + 1,
+            previous=previous,
+            current=current,
+        )
+
+    def __call__(self, value: typing.Any) -> typing.Any:
+        # Reject unsuitable inputs *before* traversing them so a one-time
+        # iterator is never consumed by validation. Indexed access plus a
+        # known length is what makes a sequence safely re-iterable.
+        if isinstance(value, (str, bytes, bytearray, memoryview)):
+            raise ValidationError(self.message_string_or_bytes)
+        if isinstance(value, CollectionMapping) or not (
+            hasattr(value, "__len__") and hasattr(value, "__getitem__")
+        ):
+            raise ValidationError(self.message_not_a_sequence)
+
+        length = len(value)
+        if length < 2:
+            return value
+
+        key = self.key
+        previous = value[0]
+        # Exceptions raised by the key function itself propagate untouched.
+        previous_key = key(previous) if key is not None else previous
+        for index in range(length - 1):
+            current = value[index + 1]
+            current_key = key(current) if key is not None else current
+            try:
+                if self.increasing:
+                    is_ordered = (
+                        previous_key < current_key
+                        if self.strict
+                        else previous_key <= current_key
+                    )
+                else:
+                    is_ordered = (
+                        previous_key > current_key
+                        if self.strict
+                        else previous_key >= current_key
+                    )
+            except TypeError as error:
+                raise ValidationError(
+                    self._format_error(
+                        value,
+                        self.message_not_comparable,
+                        index=index,
+                        previous=previous,
+                        current=current,
+                    )
+                ) from error
+            if not is_ordered:
+                raise ValidationError(
+                    self._format_error(
+                        value,
+                        self.message_order,
+                        index=index,
+                        previous=previous,
+                        current=current,
+                    )
+                )
+            previous, previous_key = current, current_key
         return value
