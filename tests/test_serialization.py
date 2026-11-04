@@ -13,7 +13,20 @@ import pytest
 
 from marshmallow import Schema, fields
 from marshmallow import missing as missing_
-from tests.base import ALL_FIELDS, DateEnum, GenderEnum, HairColorEnum, User, central
+from marshmallow.exceptions import ValidationError
+from tests.base import (
+    ALL_FIELDS,
+    DateEnum,
+    ExplicitZeroPermissionFlag,
+    GenderEnum,
+    HairColorEnum,
+    PermissionFlag,
+    PermissionIntFlag,
+    ReorderedPermissionFlag,
+    UnrepresentablePermissionFlag,
+    User,
+    central,
+)
 
 
 class Point(NamedTuple):
@@ -252,6 +265,66 @@ class TestFieldSerialization:
         user.some_date = DateEnum.date_1
         field3 = fields.Enum(DateEnum, by_value=fields.Date(format="%d/%m/%Y"))
         assert field3.serialize("some_date", user) == "29/02/2004"
+
+    def test_flag_field_combined_value_serialization(self):
+        field = fields.Flag(PermissionFlag)
+        assert field._serialize(
+            PermissionFlag.read | PermissionFlag.write, None, None
+        ) == ["read", "write"]
+
+    def test_flag_field_intflag_serialization(self):
+        field = fields.Flag(PermissionIntFlag)
+        assert (
+            field._serialize(
+                PermissionIntFlag.read | PermissionIntFlag.execute, None, None
+            )
+            == ["read", "execute"]
+        )
+
+    def test_flag_field_serializes_in_declaration_order(self):
+        field = fields.Flag(ReorderedPermissionFlag)
+        value = (
+            ReorderedPermissionFlag.read
+            | ReorderedPermissionFlag.write
+            | ReorderedPermissionFlag.execute
+        )
+        assert field._serialize(value, None, None) == ["execute", "write", "read"]
+
+    def test_flag_field_expands_aliases_to_single_flags(self):
+        field = fields.Flag(PermissionFlag)
+        # Combined members are never emitted, even when the value comes from one.
+        assert field._serialize(PermissionFlag.read_write, None, None) == [
+            "read",
+            "write",
+        ]
+        assert field._serialize(PermissionFlag.all, None, None) == [
+            "read",
+            "write",
+            "execute",
+        ]
+
+    def test_flag_field_zero_serializes_to_empty_list(self):
+        field = fields.Flag(PermissionFlag)
+        assert field._serialize(PermissionFlag(0), None, None) == []
+
+        explicit = fields.Flag(ExplicitZeroPermissionFlag)
+        assert explicit._serialize(ExplicitZeroPermissionFlag.none, None, None) == []
+
+    def test_flag_field_none_serialization(self):
+        field = fields.Flag(PermissionFlag)
+        assert field._serialize(None, None, None) is None
+
+    def test_flag_field_unrepresentable_bits_not_silently_dropped(self):
+        field = fields.Flag(UnrepresentablePermissionFlag)
+        with pytest.raises(ValidationError, match="Unrepresentable flag bits: 8."):
+            field._serialize(
+                UnrepresentablePermissionFlag.read_write_extra, None, None
+            )
+
+    def test_flag_field_not_an_enum_member(self):
+        field = fields.Flag(PermissionFlag)
+        with pytest.raises(ValidationError, match="Not a valid list."):
+            field._serialize(3, None, None)
 
     def test_decimal_field(self, user):
         user.m1 = 12

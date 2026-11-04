@@ -14,6 +14,7 @@ import typing
 import uuid
 from collections.abc import Mapping as _Mapping
 from enum import Enum as EnumType
+from enum import Flag as FlagType
 
 try:
     from typing import Unpack
@@ -56,6 +57,7 @@ __all__ = [
     "Email",
     "Enum",
     "Field",
+    "Flag",
     "Float",
     "Function",
     "IPInterface",
@@ -1999,6 +2001,130 @@ class Enum(Field[_EnumT]):
         except KeyError as error:
             raise self.make_error("unknown", choices=self.choices_text) from error
         return ret
+
+
+_FlagT = typing.TypeVar("_FlagT", bound=FlagType)
+
+
+class Flag(Field[_FlagT]):
+    """A Flag field (de)serializing `enum.Flag` (and `enum.IntFlag`) members as
+    a list of member names.
+
+    A list of flag names is deserialized into their combined value::
+
+        field.deserialize(["read", "write"]) == Permission.read | Permission.write
+
+    Combined values are serialized to the names of every single-bit flag they
+    contain, ordered by declaration order in the enum. Names of declared
+    combined members (aliases) are accepted on load, but always expanded into
+    single-bit flags on dump; aliases are never emitted.
+
+    An empty list (de)serializes to/from the zero value. Repeated names are
+    only counted once. Bits that cannot be represented by the declared
+    single-bit flags raise a validation error instead of being silently
+    dropped.
+
+    :param enum: A subclass of `enum.Flag` (including `enum.IntFlag`).
+
+    .. versionadded:: 4.4.0
+    """
+
+    default_error_messages = {
+        "invalid": "Not a valid list.",
+        "unknown": "Must be one of: {choices}.",
+        "unrepresentable": "Unrepresentable flag bits: {bits}.",
+    }
+
+    def __init__(
+        self,
+        enum: type[_FlagT],
+        **kwargs: Unpack[_BaseFieldKwargs],
+    ):
+        super().__init__(**kwargs)
+        if not isinstance(enum, type) or not issubclass(enum, FlagType):
+            raise ValueError(
+                '"enum" must be a subclass of enum.Flag (such as enum.IntFlag).'
+            )
+        self.enum = enum
+        self.field: Field = String()
+        self.choices_text = ", ".join(
+            str(self.field._serialize(m, None, None)) for m in enum.__members__
+        )
+        # The canonical, single-bit members, in declaration order. These are the
+        # only names emitted on dump and the bits that are representable.
+        self.flags = [
+            member
+            for member in enum
+            if isinstance(member.value, int)
+            and member.value > 0
+            and member.value & (member.value - 1) == 0
+        ]
+        self.mask = 0
+        for member in self.flags:
+            self.mask |= member.value
+
+    def _combine(self, members: typing.Sequence[_FlagT]) -> _FlagT:
+        """OR the members together, mapping an empty sequence to the zero value."""
+        if not members:
+            return self.enum(0)
+        result = members[0]
+        for member in members[1:]:
+            result |= member
+        return result
+
+    def _unrepresentable_bits(self, value: _FlagT) -> int:
+        return value.value & ~self.mask
+
+    def _serialize(
+        self, value: _FlagT | None, attr: str | None, obj: typing.Any, **kwargs
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, self.enum):
+            raise self.make_error("invalid")
+        bits = self._unrepresentable_bits(value)
+        if bits:
+            raise self.make_error("unrepresentable", bits=bits)
+        return [
+            member.name
+            for member in self.flags
+            if member.name is not None and member.value & value.value
+        ]
+
+    def _deserialize(self, value, attr, data, **kwargs) -> _FlagT:
+        if isinstance(value, self.enum):
+            bits = self._unrepresentable_bits(value)
+            if bits:
+                raise self.make_error("unrepresentable", bits=bits)
+            return value
+        if not utils.is_collection(value):
+            raise self.make_error("invalid")
+
+        members: list[_FlagT] = []
+        errors: dict[int, typing.Any] = {}
+        for idx, each in enumerate(value):
+            try:
+                name = self.field.deserialize(each, **kwargs)
+            except ValidationError as error:
+                errors[idx] = error.messages
+                continue
+            try:
+                member = self.enum[name]
+            except KeyError:
+                errors[idx] = self.make_error(
+                    "unknown", choices=self.choices_text
+                ).messages
+                continue
+            bits = member.value & ~self.mask
+            if bits:
+                errors[idx] = self.make_error("unrepresentable", bits=bits).messages
+                continue
+            members.append(member)
+        if errors:
+            raise ValidationError(
+                errors, valid_data=typing.cast("typing.Any", self._combine(members))
+            )
+        return self._combine(members)
 
 
 class Method(Field):

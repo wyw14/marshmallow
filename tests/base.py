@@ -4,7 +4,7 @@ import datetime as dt
 import functools
 import typing
 import uuid
-from enum import Enum, IntEnum
+from enum import Enum, Flag, IntEnum, IntFlag
 from zoneinfo import ZoneInfo
 
 import simplejson
@@ -37,6 +37,40 @@ class DateEnum(Enum):
     date_1 = dt.date(2004, 2, 29)
     date_2 = dt.date(2008, 2, 29)
     date_3 = dt.date(2012, 2, 29)
+
+
+class PermissionFlag(Flag):
+    read = 1
+    write = 2
+    execute = 4
+    read_write = read | write  # alias of a combined value
+    all = read | write | execute  # alias of a combined value
+
+
+class PermissionIntFlag(IntFlag):
+    read = 1
+    write = 2
+    execute = 4
+
+
+# Declared in reverse numeric order to verify name order follows declaration.
+class ReorderedPermissionFlag(Flag):
+    execute = 4
+    write = 2
+    read = 1
+
+
+class ExplicitZeroPermissionFlag(Flag):
+    none = 0
+    read = 1
+    write = 2
+
+
+class UnrepresentablePermissionFlag(Flag):
+    read = 1
+    write = 2
+    # Contains a bit (8) with no declared single-bit flag.
+    read_write_extra = read | write | 8
 
 
 ALL_FIELDS = [

@@ -22,9 +22,13 @@ from marshmallow.exceptions import ValidationError
 from tests.base import (
     ALL_FIELDS,
     DateEnum,
+    ExplicitZeroPermissionFlag,
     GenderEnum,
     HairColorEnum,
+    PermissionFlag,
+    PermissionIntFlag,
     UltimatumEnum,
+    UnrepresentablePermissionFlag,
     assert_date_equal,
     assert_time_equal,
     central,
@@ -1287,6 +1291,113 @@ class TestFieldDeserialization:
     def test_enum_by_value_allow_none_default(self):
         field = fields.Enum(UltimatumEnum, by_value=True)
         assert field.deserialize(None) is None
+
+    def test_flag_field_deserialization(self):
+        field = fields.Flag(PermissionFlag)
+        assert field.deserialize(["read", "write"]) == (
+            PermissionFlag.read | PermissionFlag.write
+        )
+
+    def test_flag_field_intflag_deserialization(self):
+        field = fields.Flag(PermissionIntFlag)
+        assert field.deserialize(["read", "execute"]) == (
+            PermissionIntFlag.read | PermissionIntFlag.execute
+        )
+
+    def test_flag_field_empty_list_deserializes_to_zero(self):
+        field = fields.Flag(PermissionFlag)
+        result = field.deserialize([])
+        assert result == PermissionFlag(0)
+        assert result.value == 0
+
+        explicit = fields.Flag(ExplicitZeroPermissionFlag)
+        assert explicit.deserialize([]) == ExplicitZeroPermissionFlag.none
+
+        int_field = fields.Flag(PermissionIntFlag)
+        int_result = int_field.deserialize([])
+        assert int_result == 0
+        assert int_result.value == 0
+
+    def test_flag_field_duplicate_names_counted_once(self):
+        field = fields.Flag(PermissionFlag)
+        assert field.deserialize(["read", "read"]) == PermissionFlag.read
+        assert field.deserialize(["read", "write", "read"]) == (
+            PermissionFlag.read | PermissionFlag.write
+        )
+
+    def test_flag_field_accepts_combined_member_names(self):
+        field = fields.Flag(PermissionFlag)
+        assert field.deserialize(["read_write"]) == (
+            PermissionFlag.read | PermissionFlag.write
+        )
+        assert field.deserialize(["all"]) == (
+            PermissionFlag.read | PermissionFlag.write | PermissionFlag.execute
+        )
+        # Aliases and single-bit names can be mixed without double-counting.
+        assert field.deserialize(["read", "read_write"]) == (
+            PermissionFlag.read | PermissionFlag.write
+        )
+
+    def test_flag_field_accepts_flag_instance(self):
+        field = fields.Flag(PermissionFlag)
+        assert field.deserialize(PermissionFlag.read | PermissionFlag.execute) == (
+            PermissionFlag.read | PermissionFlag.execute
+        )
+
+    def test_flag_field_unknown_name_error_reports_index(self):
+        field = fields.Flag(PermissionFlag)
+        with pytest.raises(ValidationError) as excinfo:
+            field.deserialize(["read", "nope"])
+        assert excinfo.value.messages == {
+            1: ["Must be one of: read, write, execute, read_write, all."]
+        }
+
+    def test_flag_field_multiple_errors_report_each_index(self):
+        field = fields.Flag(PermissionFlag)
+        with pytest.raises(ValidationError) as excinfo:
+            field.deserialize(["nope", 42, "read", "what"])
+        assert set(excinfo.value.messages) == {0, 1, 3}
+        assert excinfo.value.messages[0] == [
+            "Must be one of: read, write, execute, read_write, all."
+        ]
+        assert excinfo.value.messages[1] == ["Not a valid string."]
+
+    def test_flag_field_not_a_collection(self):
+        field = fields.Flag(PermissionFlag)
+        for invalid in ("read", 3, {"read": 1}):
+            with pytest.raises(ValidationError, match="Not a valid list."):
+                field.deserialize(invalid)
+
+    def test_flag_field_unrepresentable_bits_rejected(self):
+        field = fields.Flag(UnrepresentablePermissionFlag)
+        with pytest.raises(ValidationError) as excinfo:
+            field.deserialize(["read", "read_write_extra"])
+        assert excinfo.value.messages == {1: ["Unrepresentable flag bits: 8."]}
+
+    def test_flag_field_instance_with_unrepresentable_bits_rejected(self):
+        field = fields.Flag(UnrepresentablePermissionFlag)
+        with pytest.raises(ValidationError, match="Unrepresentable flag bits: 8."):
+            field.deserialize(UnrepresentablePermissionFlag.read_write_extra)
+
+    def test_flag_field_none(self):
+        field = fields.Flag(PermissionFlag)
+        with pytest.raises(ValidationError, match="null"):
+            field.deserialize(None)
+        field_none = fields.Flag(PermissionFlag, allow_none=True)
+        assert field_none.deserialize(None) is None
+
+    def test_flag_field_requires_flag_enum(self):
+        with pytest.raises(ValueError, match="enum.Flag"):
+            fields.Flag(GenderEnum)
+
+    def test_flag_field_indexed_errors_in_schema(self):
+        class PermissionSchema(Schema):
+            perms = fields.Flag(PermissionFlag)
+
+        errors = PermissionSchema().validate({"perms": ["read", "nope"]})
+        assert errors == {
+            "perms": {1: ["Must be one of: read, write, execute, read_write, all."]}
+        }
 
     def test_deserialization_function_must_be_callable(self):
         with pytest.raises(TypeError):
